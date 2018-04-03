@@ -1,156 +1,68 @@
-#define PFC_PLUS A0
-#define BATT_MINUS A1
-#define BATT_I A2
-#define AC_I A4
-#define CHARGE_PWM 9
-#define VOLT_COEFF 2.366
-#define AC_I_COEFF 8.888
-#define AC_I_ZERO 181
-#define BATT_I_COEFF 8.371
-#define BATT_I_ZERO 508.7 // ADC value at zero amps
-#define OVERHEAT_SENSE 12 // gets shorted to ground when overheating
-#define RED_LEDS 5
-#define GREEN_LEDS 6
-#define BLUE_LEDS 11
+#include "PWMFrequency.h" // https://github.com/kiwisincebirth/Arduino/blob/master/libraries/PWMFrequency/examples/LeonardoFrequencyTest/LeonardoFrequencyTest.pde
+
+#define HYDMOTOR_PWM_PIN        9
+#define HYDMOTOR_PWM_MAX        255 // 255 is fully ON with analogWrite()
+#define HYDMOTOR_PWM_MIN        40 // start ramp from here
+#define PWM_INC_RATE            5 // milliseconds between PWM increments
+
+int mode = 1;  // 0 = user entry, 1 = automatic ramp up to max,
+unsigned long lastIncrementPwm = 0; // what time we last incremented PWM value by 1
+unsigned long displayTime = 0;
+int oldPwmValue = 0;
 
 void setup() {
   Serial.begin(9600);
-  pinMode(CHARGE_PWM, OUTPUT);
-  pinMode(RED_LEDS,OUTPUT);
-  pinMode(GREEN_LEDS,OUTPUT);
-  pinMode(BLUE_LEDS,OUTPUT);
-  digitalWrite(BLUE_LEDS,HIGH);
-  digitalWrite(OVERHEAT_SENSE,HIGH);  // enable pullup resistor
-  Serial.println("serial_pwm vancharge");
+  pinMode(HYDMOTOR_PWM_PIN, OUTPUT);
+  setPWMPrescaler(HYDMOTOR_PWM_PIN,8); // 8=3906.25Hz   31250Hz / 1,8,64,256,1024
+  Serial.println("vanhydraulic");
+  setMotorPwm(HYDMOTOR_PWM_MIN); // start motor at minimum power
+  lastIncrementPwm = millis();
 }
 
-unsigned long displayTime = 0;
-float pfc_v, batt_v, ac_i, batt_i;
-int pwmValue,oldPwmValue = 0;
-
 void loop() {
+  if (mode == 1) incrementPwm();
   while (Serial.available() > 0) {
-
-    // look for the next valid integer in the incoming serial stream:
-    pwmValue = Serial.parseInt();
-    // look for the newline. That's the end of your
-    // if (Serial.read() == '/n') {
-      if ((pwmValue != oldPwmValue) && (pwmValue < 128)) {
-      pwmValue = constrain(pwmValue, 0, 127);
-      oldPwmValue = pwmValue;
+    int inputInt = Serial.parseInt(); // look for the next valid integer in the incoming serial stream:
+    if ((inputInt < 256) && (inputInt >= 0)) {
+      mode = 0; // switch to user entry mode
+      int pwmValue = constrain(inputInt, 0, 255);
       Serial.println(pwmValue);
-      analogWrite(CHARGE_PWM,pwmValue);
-      analogWrite(RED_LEDS,pwmValue);
-    } else {
-      pwmValue = oldPwmValue;
+      setMotorPwm(pwmValue);
+    } else if ((inputInt >= -5) && (inputInt <= -1)) {
+      mode = inputInt * -1;
+      Serial.print("mode to ");
+      Serial.println(inputInt * -1);
+    } else if ((inputInt >= -10240) && (inputInt <= -10)) {
+      setPWMPrescaler(HYDMOTOR_PWM_PIN,inputInt * -10);
+      Serial.print("setPWMPrescaler to ");
+      Serial.println(inputInt * -10);
     }
   }
-  getVolts();
-  if ( millis() - displayTime > 1000 ) {
-    printDisplay();
-    displayTime = millis();
+  printDisplay();
+}
+
+void incrementPwm() {
+  if (millis() - lastIncrementPwm > PWM_INC_RATE) {
+    lastIncrementPwm = millis();
+    setMotorPwm(constrain(oldPwmValue+1,HYDMOTOR_PWM_MIN,HYDMOTOR_PWM_MAX));
+  }
+}
+
+void setMotorPwm(int newValue) {
+  if (newValue != oldPwmValue) { // don't analogWrite unnecessarily
+    analogWrite(HYDMOTOR_PWM_PIN,newValue);
+    oldPwmValue = newValue;
   }
 }
 
 void printDisplay() {
-  if (!digitalRead(OVERHEAT_SENSE)) Serial.println("OVERHEATING!  ");
-  Serial.print("PWM: ");
-  Serial.print(pwmValue);
+  if ( millis() - displayTime > 1000 ) {
+    displayTime = millis();
+    // if (!digitalRead(OVERHEAT_SENSE)) Serial.println("OVERHEATING!  ");
+    Serial.print("PWM: ");
+    Serial.print(oldPwmValue);
 
-  Serial.print("  AC_I: ");
-  Serial.print(ac_i,1);
-  Serial.print(" (");
-  Serial.print(averageRead(AC_I));
-
-  Serial.print(")  PFC_V: ");
-  Serial.print(pfc_v,1);
-  Serial.print(" (");
-  Serial.print(averageRead(PFC_PLUS));
-
-  Serial.print(")  BATT_V: ");
-  Serial.print(batt_v,1);
-  Serial.print(" (");
-  Serial.print(averageRead(BATT_MINUS));
-
-  Serial.print(")  BATT_I: ");
-  Serial.print(batt_i,1);
-  Serial.print(" (");
-  Serial.print(averageRead(BATT_I));
-  Serial.println(")");
-}
-
-void getVolts() {
-  pfc_v = averageRead(PFC_PLUS) / VOLT_COEFF;
-  float batt_minus_v = averageRead(BATT_MINUS) / VOLT_COEFF;
-  batt_v = pfc_v - batt_minus_v; // pluses are connected together
-  batt_i = ( averageRead(BATT_I) - BATT_I_ZERO ) / BATT_I_COEFF;
-  ac_i = ( averageRead(AC_I) - AC_I_ZERO ) / AC_I_COEFF;
-}
-
-float averageRead(int pin) {
-  float analogAdder = 0;
-  for (int i = 0; i < 50; i++) analogAdder += analogRead(pin);
-  analogAdder /= 50;
-  return analogAdder;
-}
-
-// Note that the base frequency for pins 3, 9, 10, and 11 is 31250 Hz
-// Note that the base frequency for pins 5 and 6 is 62500 Hz
-void setPwmFrequency(int pin, int divisor) {
-  byte mode;
-  if(pin == 5 || pin == 6 || pin == 9 || pin == 10) {
-    switch(divisor) {
-    case 1:
-      mode = 0x01;
-      break;
-    case 8:
-      mode = 0x02;
-      break;
-    case 64:
-      mode = 0x03;
-      break;
-    case 256:
-      mode = 0x04;
-      break;
-    case 1024:
-      mode = 0x05;
-      break;
-    default:
-      return;
-    }
-    if(pin == 5 || pin == 6) {
-      TCCR0B = TCCR0B & 0b11111000 | mode;
-    }
-    else {
-      TCCR1B = TCCR1B & 0b11111000 | mode;
-    }
-  }
-  else if(pin == 3 || pin == 11) {
-    switch(divisor) {
-    case 1:
-      mode = 0x01;
-      break;
-    case 8:
-      mode = 0x02;
-      break;
-    case 32:
-      mode = 0x03;
-      break;
-    case 64:
-      mode = 0x04;
-      break;
-    case 128:
-      mode = 0x05;
-      break;
-    case 256:
-      mode = 0x06;
-      break;
-    case 1024:
-      mode = 0x7;
-      break;
-    default:
-      return;
-    }
-    TCCR2B = TCCR2B & 0b11111000 | mode;
+    Serial.print("  mode: ");
+    Serial.println(mode);
   }
 }
